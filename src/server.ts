@@ -1,10 +1,12 @@
 import express, { Express, Request, Response } from "express";
 import dotenv from "dotenv";
 import axios from "axios";
+import cors from "cors";
 import { Pool, PoolConfig } from "pg";
 
 dotenv.config();
 const app: Express = express();
+app.use(cors())
 const port = process.env.PORT || 4000;
 
 const dbConfig: PoolConfig = {
@@ -88,7 +90,7 @@ app.get("/login", async (req: Request, res: Response) => {
         UPDATE public.users
         SET instance_id=$2
         WHERE username=$1;
-      `, [req.query.user as string, instance_token as number])
+      `, [req.query.username as string, instance_token as number])
       res.status(200).send(responseObj(true, '', {token: instance_token}))
     } catch (e) {
       console.log(e);
@@ -98,45 +100,70 @@ app.get("/login", async (req: Request, res: Response) => {
 });
 
 app.get("/newLinkToken", async (req: Request, res: Response) => {
-  await axios
-    .post(`${PLAID_URL}/link/token/create`, {
-      ...PLAID_CREDS,
-      client_name: "Hackweek 2 Express Server",
-      language: "en",
-      country_codes: ["CA"],
-      user: {
-        client_user_id: "user-id",
-      },
-      products: ["auth", "transactions"],
-    })
-    .then((response) => {
-      let sendback = response.data;
-      delete sendback.request_id;
-      res.status(200).send(responseObj(true, '', sendback));
-    })
-    .catch((err) => {
-      console.log(err);
-      res.status(500).send(responseObj(false, 'Plaid Error'));
-    });
-});
-
-app.get("/submitPublicToken", async (req: Request, res: Response) => {
-  if (!req.params.token) {
-    res.status(400).send(responseObj(false, 'No token supplied'));
+  if (!req.query.username) {
+    res.status(400).send(responseObj(false, 'No username'))
   } else {
     await axios
-      .post(`${PLAID_URL}/item/public_token/exchange`, {
+      .post(`${PLAID_URL}/link/token/create`, {
         ...PLAID_CREDS,
-        public_token: req.params.token,
+        client_name: "Hackweek 2 Express Server",
+        language: "en",
+        country_codes: ["CA"],
+        user: {
+          client_user_id: req.query.username,
+        },
+        products: ["auth", "transactions"],
       })
       .then((response) => {
-        console.log(response.data);
-        res.status(200).send(responseObj(true));
+        let sendback = response.data;
+        delete sendback.request_id;
+        res.status(200).send(responseObj(true, '', sendback));
       })
       .catch((err) => {
         console.log(err);
         res.status(500).send(responseObj(false, 'Plaid Error'));
       });
+  }
+});
+
+app.get("/submitPublicToken", async (req: Request, res: Response) => {
+  if (!req.query.token || !req.query.username || !req.query.public_token) {
+    res.status(400).send(responseObj(false, 'Either Token or Username missing'));
+  } else {
+    const isVerified = await verifyInstance(req.query.username as string, parseInt(req.query.token as string))
+    if (!isVerified) {
+      res.status(403).send(responseObj(false, 'Invalid user'))
+    } else {
+      await axios
+        .post(`${PLAID_URL}/item/public_token/exchange`, {
+          ...PLAID_CREDS,
+          public_token: req.query.public_token,
+        })
+        .then(async (response) => {
+          // console.log(response.data);
+          const cur_res = await pool.query(`
+            SELECT * FROM public.users
+            WHERE username=$1;
+          `, [req.query.username])
+          let cur_tokens: string = cur_res.rows[0].plaid_tokens;
+          if (!cur_tokens) {
+            cur_tokens = ''
+          }
+          let tokens_ls =  cur_tokens.split('~')
+          tokens_ls.push(`${response.data.access_token}|${response.data.item_id}`)
+          const new_tokens = tokens_ls.join('~')
+          await pool.query(`
+            UPDATE public.users
+            SET plaid_tokens=$2
+            WHERE username=$1;
+          `, [req.query.username as string, new_tokens as string])
+          res.status(200).send(responseObj(true));
+        })
+        .catch((err) => {
+          console.log(err);
+          res.status(500).send(responseObj(false, 'Plaid Error'));
+        });
+    }
   }
 });
 

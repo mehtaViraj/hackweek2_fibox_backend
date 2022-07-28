@@ -108,7 +108,7 @@ app.get("/newLinkToken", async (req: Request, res: Response) => {
         ...PLAID_CREDS,
         client_name: "Hackweek 2 Express Server",
         language: "en",
-        country_codes: ["CA"],
+        country_codes: ["CA", "US"],
         user: {
           client_user_id: req.query.username,
         },
@@ -164,6 +164,57 @@ app.get("/submitPublicToken", async (req: Request, res: Response) => {
           res.status(500).send(responseObj(false, 'Plaid Error'));
         });
     }
+  }
+});
+
+app.get("/getAllAccountData", async (req: Request, res: Response) => {
+
+  let accountsLS: Array<any> = []
+  async function pushAccountData(accessToken: string) {
+      try {
+      const res = await axios.post(`${PLAID_URL}/accounts/balance/get`, {
+        ...PLAID_CREDS,
+        access_token: accessToken,
+      })
+      accountsLS = accountsLS.concat(res.data.accounts);
+  } catch(e) {
+    console.log(e)
+    // console.log(accessToken)
+  }
+  }
+
+  if (!req.query.token || !req.query.username ) {
+    res.status(400).send(responseObj(false, 'Either Token or Username missing'));
+  } else {
+    try {
+      const cur_res = await pool.query(`
+        SELECT * FROM public.users
+        WHERE username=$1;
+      `, [req.query.username])
+      let cur_tokens: string = cur_res.rows[0].plaid_tokens;
+      if (!cur_tokens) {
+        cur_tokens = ''
+      }
+      let tokens_ls =  cur_tokens.split('~')
+
+      console.log(tokens_ls
+        .filter((i) => (i && i.length !== 0))
+        .map((tokenPair) => {return tokenPair.split('|')[0]})
+      )
+
+      await Promise.all(
+        tokens_ls
+          .filter((i) => (i && i.length !== 0))
+          .map((tokenPair) => {return tokenPair.split('|')[0]})
+          .map((access_token) => {return(pushAccountData(access_token))})
+      )
+
+      res.status(200).send(responseObj(true, '', accountsLS))
+    } catch(e) {
+      console.log(e);
+      res.status(500).send(responseObj(false, 'server error'))
+    }
+
   }
 });
 

@@ -176,7 +176,9 @@ app.get("/getAllAccountData", async (req: Request, res: Response) => {
         ...PLAID_CREDS,
         access_token: accessToken,
       })
-      accountsLS = accountsLS.concat(res.data.accounts);
+      const item_id = res.data.item.item_id 
+      const returnData = res.data.accounts.map((i: any) => {return({...i, item_id: item_id})})
+      accountsLS = accountsLS.concat(returnData);
   } catch(e) {
     console.log(e)
     // console.log(accessToken)
@@ -186,37 +188,90 @@ app.get("/getAllAccountData", async (req: Request, res: Response) => {
   if (!req.query.token || !req.query.username ) {
     res.status(400).send(responseObj(false, 'Either Token or Username missing'));
   } else {
-    try {
-      const cur_res = await pool.query(`
-        SELECT * FROM public.users
-        WHERE username=$1;
-      `, [req.query.username])
-      let cur_tokens: string = cur_res.rows[0].plaid_tokens;
-      if (!cur_tokens) {
-        cur_tokens = ''
+    const isVerified = await verifyInstance(req.query.username as string, parseInt(req.query.token as string))
+    if (!isVerified) {
+      res.status(403).send(responseObj(false, 'Invalid user'))
+    } else {
+      try {
+        const cur_res = await pool.query(`
+          SELECT * FROM public.users
+          WHERE username=$1;
+        `, [req.query.username])
+
+        let cur_tokens: string = cur_res.rows[0].plaid_tokens;
+        if (!cur_tokens) {
+          cur_tokens = ''
+        }
+        let tokens_ls =  cur_tokens.split('~')
+
+        await Promise.all(
+          tokens_ls
+            .filter((i) => (i && i.length !== 0))
+            .map((tokenPair) => {return tokenPair.split('|')[0]})
+            .map((access_token) => {return(pushAccountData(access_token))})
+        )
+
+        res.status(200).send(responseObj(true, '', accountsLS))
+      } catch(e) {
+        console.log(e);
+        res.status(500).send(responseObj(false, 'server error'))
       }
-      let tokens_ls =  cur_tokens.split('~')
-
-      console.log(tokens_ls
-        .filter((i) => (i && i.length !== 0))
-        .map((tokenPair) => {return tokenPair.split('|')[0]})
-      )
-
-      await Promise.all(
-        tokens_ls
-          .filter((i) => (i && i.length !== 0))
-          .map((tokenPair) => {return tokenPair.split('|')[0]})
-          .map((access_token) => {return(pushAccountData(access_token))})
-      )
-
-      res.status(200).send(responseObj(true, '', accountsLS))
-    } catch(e) {
-      console.log(e);
-      res.status(500).send(responseObj(false, 'server error'))
     }
-
   }
 });
+
+app.get("/getTransactions", async (req: Request, res: Response) => {
+  if (!req.query.token || !req.query.username || !req.query.account_id || !req.query.item_id) {
+    res.status(400).send(responseObj(false, 'Request parameters missing'));
+  } else {
+    const isVerified = await verifyInstance(req.query.username as string, parseInt(req.query.token as string))
+    if (!isVerified) {
+      res.status(403).send(responseObj(false, 'Invalid user'))
+    } else {
+      try {
+        const cur_res = await pool.query(`
+          SELECT * FROM public.users
+          WHERE username=$1;
+        `, [req.query.username])
+
+        let cur_tokens: string = cur_res.rows[0].plaid_tokens;
+        if (!cur_tokens) {
+          cur_tokens = ''
+        }
+        let tokens_ls: any =  cur_tokens.split('~')
+        tokens_ls = tokens_ls.map((i: string) => {return(i.split('|'))})
+
+        let access_token: string|null = null;
+        for (const tokenPair of tokens_ls) {
+          if(tokenPair[1] === req.query.item_id) {
+            access_token = tokenPair[0];
+          }
+        }
+
+        if (!access_token) {
+          res.status(400).send(responseObj(false, 'Invalid item_id'));
+        } else {
+          await axios.post(`${PLAID_URL}/transactions/get`, {
+            ...PLAID_CREDS,
+            access_token: access_token,
+            start_date: "2022-01-01",
+            end_date: "2022-12-01",
+            options: {
+              count: 35,
+              account_ids: [req.query.account_id]
+            }
+          }).then( (response) => {
+            const resData = response.data.transactions
+            res.status(200).send(responseObj(true, '', resData))
+          })
+        }
+      } catch(e) {
+        console.log(e);
+        res.status(500).send(responseObj(false, 'server error'))
+      }
+    }
+  }
+})
 
 app.listen(port, () => {
   console.log(`⚡️[server]: Server is running at http://localhost:${port}`);
